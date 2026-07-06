@@ -1,0 +1,55 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.Python
+
+# ---- Entornos virtuales ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- PyInstaller / empaquetado ----
+build/
+dist/
+*.spec.bak
+*.manifest
+
+# ---- Testing / coverage ----
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Modelos Whisper (pesados, se descargan aparte) ----
+*.bin
+*.pt
+*.ckpt
+models/
+
+# ---- Secretos / config local ----
+.env
+.env.*
+config.local.toml
+*.secret
+
+# ---- IDE / editor ----
+.idea/
+.vscode/
+*.swp
+*~
+
+# ---- Sistema operativo ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- Logs / temporales ----
+*.log
+*.tmp
