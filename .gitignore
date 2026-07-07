@@ -1,3 +1,7 @@
+# ---- Rust ----
+/rust/target/
+**/*.rs.bk
+
 # ---- Python ----
 __pycache__/
 *.py[cod]
@@ -53,3 +57,6 @@ Desktop.ini
 # ---- Logs / temporales ----
 *.log
 *.tmp
+
+# Paquete de producción (binario pesado)
+/rust/dist/

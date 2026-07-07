@@ -1,0 +1,69 @@
+[package]
+name = "voicecode"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Dictado push-to-talk: graba audio, transcribe con Whisper y pega el texto en la ventana activa"
+
+[lib]
+name = "voicecode"
+path = "src/lib.rs"
+
+[[bin]]
+name = "voicecode"
+path = "src/main.rs"
+
+[features]
+default = ["groq"]
+# Backend local con whisper-rs (whisper.cpp), GPU-first vía CUDA: usa la GPU si hay
+# una disponible y cae a CPU si no. Requiere CMake + MSVC + CUDA Toolkit + LLVM 18.
+local = ["dep:whisper-rs", "whisper-rs/cuda"]
+# Backend local sin CUDA (solo CPU). Útil en máquinas sin GPU NVIDIA / sin CUDA.
+local-cpu = ["dep:whisper-rs"]
+# Backend por API de Groq (compatible OpenAI). Binario pequeño, sin build nativo.
+groq = ["dep:reqwest", "dep:hound"]
+
+[dependencies]
+# Runtime async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
+
+# Errores y logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Config
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Limpieza de texto
+regex = "1"
+
+# Supresión de ruido (RNNoise puro-Rust). Sin default-features para no traer su CLI.
+nnnoiseless = { version = "0.5", default-features = false }
+
+# Hardware / IO de escritorio (se agregan al implementar cada módulo)
+cpal = "0.15"
+rdev = "0.5"
+enigo = "0.2"
+arboard = "3"
+scopeguard = "1"
+
+# Tray icon + event loop
+tray-icon = "0.19"
+tao = "0.30"
+
+# Backend Groq (feature "groq")
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "rustls-tls"], optional = true }
+hound = { version = "3", optional = true }
+
+# Backend local (feature "local")
+whisper-rs = { version = "0.14", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
+tempfile = "3"
