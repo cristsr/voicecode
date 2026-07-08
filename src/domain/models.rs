@@ -1,21 +1,20 @@
-//! Modelos de dominio. Equivalen a los `dataclass(frozen=True)` de
-//! `domain/models.py`: inmutables por convención (nunca se mutan tras crearse).
+//! Domain models. Immutable by convention: never mutated after creation.
 
-/// Tipo de evento de tecla del push-to-talk.
+/// Kind of push-to-talk key event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyEventKind {
     Down,
     Up,
 }
 
-/// Evento de la tecla PTT (`== KeyEvent` en Python).
+/// A push-to-talk key event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyEvent {
     pub kind: KeyEventKind,
     pub key: String,
 }
 
-/// Bloque de audio grabado, con su número de secuencia de origen.
+/// A recorded audio block tagged with its source sequence number.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioChunk {
     pub seq: u64,
@@ -23,14 +22,14 @@ pub struct AudioChunk {
     pub sample_rate: u32,
 }
 
-/// Texto crudo devuelto por el transcriptor.
+/// Raw text returned by the transcriber.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TranscribedText {
     pub seq: u64,
     pub raw: String,
 }
 
-/// Texto ya limpiado, listo para pegar.
+/// Cleaned text, ready to paste.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CleanText {
     pub seq: u64,

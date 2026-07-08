@@ -1,9 +1,9 @@
-//! Test de integración end-to-end (== `tests/test_pipeline_e2e.py`).
+//! End-to-end integration test.
 //!
-//! Alimenta `AudioChunk` sintéticos y verifica que el texto se pega en el orden
-//! correcto de `seq`, aun cuando las transcripciones terminan fuera de orden
-//! (lo reordena el `SequenceBuffer` del writer). Usa fakes inyectados por los
-//! traits, sin GPU, audio ni red.
+//! Feeds synthetic `AudioChunk`s and verifies text is pasted in the correct
+//! `seq` order even when transcriptions finish out of order (reordered by the
+//! writer's `SequenceBuffer`). Uses fakes injected via the traits — no GPU,
+//! audio or network involved.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,8 +17,8 @@ use voicecode::pipeline::cleaner::RegexCleaner;
 use voicecode::pipeline::transcriber::WhisperTranscriber;
 use voicecode::pipeline::writer::ClipboardWriter;
 
-/// Backend fake: deriva el texto del `seq` (codificado en la primera muestra) y
-/// duerme más para los `seq` bajos, forzando finalización en orden inverso.
+/// Fake backend: derives the text from `seq` (encoded in the first sample) and
+/// sleeps longer for lower `seq` values, forcing reverse-order completion.
 struct SeqBackend;
 
 #[async_trait]
@@ -71,7 +71,7 @@ async fn pipeline_emits_text_in_seq_order_despite_out_of_order_transcription() {
     let pasted = Arc::new(Mutex::new(Vec::new()));
 
     let transcriber = WhisperTranscriber::new(Arc::new(SeqBackend), "es".into(), 8, false);
-    let cleaner = RegexCleaner::new(vec![]); // sin muletillas: texto intacto
+    let cleaner = RegexCleaner::new(vec![]); // no filler patterns: text passes through untouched
     let mut writer = ClipboardWriter::new(
         Box::new(FakeKeyboard {
             current: current.clone(),
@@ -87,7 +87,7 @@ async fn pipeline_emits_text_in_seq_order_despite_out_of_order_transcription() {
     let (text_tx, text_rx) = mpsc::channel(16);
     let (clean_tx, clean_rx) = mpsc::channel(16);
 
-    // Se envían en orden; el backend los completa en orden inverso.
+    // Sent in order; the backend completes them in reverse order.
     for seq in 0..3 {
         audio_tx.send(chunk(seq)).await.unwrap();
     }
@@ -99,6 +99,6 @@ async fn pipeline_emits_text_in_seq_order_despite_out_of_order_transcription() {
         writer.run(clean_rx),
     );
 
-    // Pese a terminar 2,1,0, el texto se pega en orden 0,1,2.
+    // Despite finishing 2,1,0, the text is pasted in order 0,1,2.
     assert_eq!(*pasted.lock().unwrap(), vec!["T0", "T1", "T2"]);
 }

@@ -1,5 +1,5 @@
-//! Backend de transcripción vía la API de Groq (compatible con OpenAI).
-//! Encodea el audio a WAV en memoria y lo sube por multipart.
+//! Transcription backend using the Groq API (OpenAI-compatible). Encodes the
+//! audio to an in-memory WAV and uploads it as multipart.
 
 use std::io::Cursor;
 
@@ -19,7 +19,7 @@ impl GroqBackend {
     pub fn from_config(config: &Config) -> anyhow::Result<Self> {
         let api_key = std::env::var(&config.groq.api_key_env).map_err(|_| {
             anyhow::anyhow!(
-                "falta la variable de entorno {} con la API key de Groq",
+                "missing environment variable {} with the Groq API key",
                 config.groq.api_key_env
             )
         })?;
@@ -32,7 +32,7 @@ impl GroqBackend {
     }
 }
 
-/// Encodea PCM f32 mono [-1, 1] a un WAV de 16-bit en memoria.
+/// Encodes mono f32 PCM in `[-1, 1]` to an in-memory 16-bit WAV.
 fn encode_wav(audio: &[f32], sample_rate: u32) -> anyhow::Result<Vec<u8>> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -95,10 +95,9 @@ mod tests {
     #[test]
     fn encode_wav_writes_valid_riff_header() {
         let wav = encode_wav(&[0.0, 0.5, -0.5], 16000).unwrap();
-        // Cabecera RIFF/WAVE.
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
-        // 44 bytes de cabecera + 3 muestras * 2 bytes.
+        // 44-byte header + 3 samples * 2 bytes.
         assert_eq!(wav.len(), 44 + 3 * 2);
     }
 }

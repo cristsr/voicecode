@@ -1,11 +1,11 @@
-//! Prueba de integración del backend local (whisper.cpp) contra el modelo GGML
-//! real. Verifica de punta a punta que el modelo carga y transcribe; con la
-//! feature `local` (CUDA) además debería inicializar la GPU (mirar el stderr de
-//! whisper.cpp con `cargo test --features local -- --nocapture`).
+//! Integration test for the local backend (whisper.cpp) against a real GGML
+//! model. Verifies end-to-end that the model loads and transcribes; with the
+//! `local` (CUDA) feature it should also initialize the GPU — check
+//! whisper.cpp's stderr via `cargo test --features local -- --nocapture`.
 //!
-//! Se **salta automáticamente** si no está el modelo en `models/ggml-large-v3.bin`
-//! (o en la ruta de la env var `VOICECODE_TEST_MODEL`), así el resto de CI no
-//! depende de un archivo de ~3 GB.
+//! Automatically **skipped** when the model is missing from
+//! `models/ggml-large-v3.bin` (or the path in `VOICECODE_TEST_MODEL`), so the
+//! rest of CI does not depend on a ~3 GB file.
 
 #![cfg(any(feature = "local", feature = "local-cpu"))]
 
@@ -15,7 +15,7 @@ use voicecode::config::Config;
 use voicecode::domain::traits::TranscriptionBackend;
 use voicecode::pipeline::transcriber::local::LocalWhisper;
 
-/// Ruta al modelo GGML: env var o el default dentro del repo.
+/// Path to the GGML model: env var override or the repo default.
 fn model_path() -> PathBuf {
     if let Ok(p) = std::env::var("VOICECODE_TEST_MODEL") {
         return PathBuf::from(p);
@@ -23,15 +23,15 @@ fn model_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/ggml-large-v3.bin")
 }
 
-/// Lee un WAV PCM de 16 bits mono a `Vec<f32>` normalizado a [-1, 1].
-/// Parser mínimo: busca el chunk `data` y lee muestras `i16` LE.
+/// Reads a 16-bit mono PCM WAV into `Vec<f32>` normalized to `[-1, 1]`.
+/// Minimal parser: finds the `data` chunk and reads little-endian `i16` samples.
 fn read_wav_i16_mono(path: &PathBuf) -> Vec<f32> {
-    let bytes = std::fs::read(path).expect("no se pudo leer el WAV de muestra");
-    // Encuentra el chunk "data": 4 bytes tag + 4 bytes tamaño, luego las muestras.
+    let bytes = std::fs::read(path).expect("failed to read the sample WAV");
+    // Find the "data" chunk: 4-byte tag + 4-byte size, then the samples.
     let pos = bytes
         .windows(4)
         .position(|w| w == b"data")
-        .expect("WAV sin chunk data");
+        .expect("WAV has no data chunk");
     let data_start = pos + 8;
     bytes[data_start..]
         .chunks_exact(2)
@@ -46,8 +46,8 @@ async fn transcribes_sample_audio_with_real_model() {
 
     if !model.exists() || !sample.exists() {
         eprintln!(
-            "SKIP: falta el modelo ({}) o el sample ({}). \
-             Descargá el GGML para correr esta prueba.",
+            "SKIP: missing model ({}) or sample ({}). \
+             Download the GGML model to run this test.",
             model.display(),
             sample.display()
         );
@@ -56,23 +56,23 @@ async fn transcribes_sample_audio_with_real_model() {
 
     let mut config = Config::default();
     config.whisper.model_path = model.to_string_lossy().into_owned();
-    config.transcriber.idle_unload_seconds = 0; // no descargar durante el test
+    config.transcriber.idle_unload_seconds = 0; // do not unload during the test
 
-    let backend = LocalWhisper::from_config(&config).expect("construir LocalWhisper");
+    let backend = LocalWhisper::from_config(&config).expect("build LocalWhisper");
 
     let audio = read_wav_i16_mono(&sample);
-    assert!(!audio.is_empty(), "el sample no tiene muestras");
+    assert!(!audio.is_empty(), "sample has no audio data");
 
     let text = backend
         .transcribe(&audio, 16_000, "en")
         .await
-        .expect("la transcripción falló");
+        .expect("transcription failed");
 
-    eprintln!("== Transcripción del modelo: {text:?}");
+    eprintln!("== Model transcription: {text:?}");
     let lower = text.to_lowercase();
     // jfk.wav: "...ask not what your country can do for you..."
     assert!(
         lower.contains("country") || lower.contains("ask"),
-        "transcripción inesperada: {text:?}"
+        "unexpected transcription: {text:?}"
     );
 }

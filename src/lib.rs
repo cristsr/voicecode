@@ -1,6 +1,5 @@
-//! VoiceCode: dictado push-to-talk. Port en Rust del proyecto Python homónimo,
-//! preservando su arquitectura de pipeline por etapas desacopladas conectadas
-//! por canales (aquí `tokio::sync::mpsc` en vez de `asyncio.Queue`).
+//! VoiceCode: push-to-talk dictation. A pipeline of decoupled stages connected
+//! by `tokio::sync::mpsc` channels.
 
 pub mod config;
 pub mod domain;
@@ -17,11 +16,12 @@ use pipeline::transcriber::{self, WhisperTranscriber};
 use pipeline::writer::{ClipboardWriter, SystemClipboard, SystemKeyboard};
 use utils::platform::check_paste_dependencies;
 
-/// Composition root: instancia cada etapa con inyección manual de dependencias,
-/// crea las 4 colas del pipeline y lanza las etapas concurrentemente
-/// (== `run_pipeline` de `main.py` con `asyncio.gather`).
+/// Composition root: instantiates each stage with manually injected
+/// dependencies, creates the pipeline's channels, and runs every stage
+/// concurrently.
 ///
-/// No retorna mientras el pipeline viva (la etapa `listener` nunca completa).
+/// Does not return while the pipeline is alive (the `listener` stage never
+/// completes).
 pub async fn run_pipeline(config: Config) -> anyhow::Result<()> {
     for warning in check_paste_dependencies() {
         tracing::warn!("{warning}");
@@ -31,9 +31,9 @@ pub async fn run_pipeline(config: Config) -> anyhow::Result<()> {
     let idle_enabled =
         config.transcriber.backend == Backend::Local && config.transcriber.idle_unload_seconds > 0;
 
-    // Precarga el modelo en segundo plano para que la primera dictada no espere
-    // los ~segundos de carga (== "GPU-first, listo antes de hablar"). No bloquea
-    // el arranque del pipeline; los backends sin estado (Groq) lo ignoran.
+    // Preload the model in the background so the first dictation does not wait
+    // out the load time (a few seconds on GPU). Does not block pipeline
+    // startup; stateless backends (Groq) ignore it.
     {
         let backend = backend.clone();
         tokio::spawn(async move { backend.warm_up().await });
