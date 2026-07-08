@@ -102,11 +102,24 @@ impl LocalWhisper {
     }
 }
 
+/// Threads whisper.cpp uses for CPU inference. Leaves a couple of cores free
+/// for the rest of the pipeline (and the OS) instead of claiming every logical
+/// core, which is what pins the CPU at 100% and makes the whole machine feel
+/// sluggish while a chunk is transcribing. Only matters on the CPU fallback
+/// path; GPU inference barely touches the CPU.
+fn inference_thread_count() -> i32 {
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    available.saturating_sub(2).max(1) as i32
+}
+
 /// Blocking inference (runs on a `spawn_blocking` thread).
 fn run_inference(ctx: &WhisperContext, audio: &[f32], language: &str) -> anyhow::Result<String> {
     let mut state = ctx.create_state()?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_language(Some(language));
+    params.set_n_threads(inference_thread_count());
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);

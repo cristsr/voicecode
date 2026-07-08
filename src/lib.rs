@@ -6,6 +6,8 @@ pub mod domain;
 pub mod pipeline;
 pub mod utils;
 
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
 
 use config::{Backend, Config};
@@ -49,7 +51,7 @@ pub async fn run_pipeline(config: Config) -> anyhow::Result<()> {
         config.audio.sample_rate,
         config.audio.channels,
         config.audio.min_audio_duration_ms,
-        Box::new(CpalInput::new(config.audio.denoise)),
+        Arc::new(CpalInput::new(config.audio.denoise)),
     );
     let transcriber = WhisperTranscriber::new(
         backend,

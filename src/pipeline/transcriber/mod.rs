@@ -80,23 +80,30 @@ impl WhisperTranscriber {
         let text_tx = text_tx.clone();
         tasks.spawn(async move {
             let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
-            match backend
+            // Every chunk must produce a `TranscribedText`, even an empty one:
+            // the writer's `SequenceBuffer` releases items strictly in `seq`
+            // order, so a `seq` that never arrives here would permanently
+            // stall every later chunk waiting behind it.
+            let raw = match backend
                 .transcribe(&chunk.data, chunk.sample_rate, &language)
                 .await
             {
-                Ok(raw) if !raw.trim().is_empty() => {
-                    let _ = text_tx
-                        .send(TranscribedText {
-                            seq: chunk.seq,
-                            raw,
-                        })
-                        .await;
+                Ok(raw) if !raw.trim().is_empty() => raw,
+                Ok(_) => {
+                    tracing::info!(seq = chunk.seq, "Discarding empty transcription");
+                    String::new()
                 }
-                Ok(_) => tracing::info!(seq = chunk.seq, "Discarding empty transcription"),
                 Err(error) => {
-                    tracing::error!(%error, seq = chunk.seq, "Error transcribing audio chunk")
+                    tracing::error!(%error, seq = chunk.seq, "Error transcribing audio chunk");
+                    String::new()
                 }
-            }
+            };
+            let _ = text_tx
+                .send(TranscribedText {
+                    seq: chunk.seq,
+                    raw,
+                })
+                .await;
         });
     }
 
@@ -210,15 +217,30 @@ mod tests {
 
     #[tokio::test]
     async fn discards_empty_transcription() {
+        // The seq must still arrive (with empty raw) so the writer's
+        // SequenceBuffer does not stall waiting for it forever.
         let out = drain(Arc::new(EmptyBackend), vec![chunk(0)]).await;
-        assert!(out.is_empty());
+        assert_eq!(
+            out,
+            vec![TranscribedText {
+                seq: 0,
+                raw: String::new()
+            }]
+        );
     }
 
     #[tokio::test]
     async fn survives_backend_error() {
-        // Must neither hang nor panic; it just drops the chunk.
+        // Must neither hang nor panic, and must still emit the seq (empty)
+        // so later chunks are not stuck behind it forever.
         let out = drain(Arc::new(ErrorBackend), vec![chunk(0)]).await;
-        assert!(out.is_empty());
+        assert_eq!(
+            out,
+            vec![TranscribedText {
+                seq: 0,
+                raw: String::new()
+            }]
+        );
     }
 
     #[tokio::test]

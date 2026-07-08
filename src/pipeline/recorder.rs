@@ -17,7 +17,7 @@ pub struct Recorder {
     sample_rate: u32,
     channels: u16,
     min_audio_duration_ms: u32,
-    input: Box<dyn AudioInput>,
+    input: Arc<dyn AudioInput>,
     seq: u64,
     recording: bool,
 }
@@ -27,7 +27,7 @@ impl Recorder {
         sample_rate: u32,
         channels: u16,
         min_audio_duration_ms: u32,
-        input: Box<dyn AudioInput>,
+        input: Arc<dyn AudioInput>,
     ) -> Self {
         Self {
             sample_rate,
@@ -71,10 +71,19 @@ impl Recorder {
         }
         self.recording = false;
 
-        let samples = match self.input.stop() {
-            Ok(samples) => samples,
-            Err(error) => {
+        // `stop()` blocks synchronously on a reply from the audio thread
+        // (denoise + resample run there); run it on a blocking-pool thread so
+        // it never ties up a Tokio worker thread while it waits.
+        let input = self.input.clone();
+        let result = tokio::task::spawn_blocking(move || input.stop()).await;
+        let samples = match result {
+            Ok(Ok(samples)) => samples,
+            Ok(Err(error)) => {
                 tracing::error!(%error, "failed to stop audio capture");
+                return;
+            }
+            Err(error) => {
+                tracing::error!(%error, "audio stop task panicked");
                 return;
             }
         };
@@ -298,7 +307,7 @@ mod tests {
     }
 
     fn recorder(samples: Vec<f32>, starts: Arc<AtomicUsize>) -> Recorder {
-        Recorder::new(16000, 1, 300, Box::new(FakeInput { samples, starts }))
+        Recorder::new(16000, 1, 300, Arc::new(FakeInput { samples, starts }))
     }
 
     fn down() -> KeyEvent {

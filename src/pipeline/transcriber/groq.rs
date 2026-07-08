@@ -2,11 +2,17 @@
 //! audio to an in-memory WAV and uploads it as multipart.
 
 use std::io::Cursor;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
 use crate::config::Config;
 use crate::domain::traits::TranscriptionBackend;
+
+/// Upper bound on a single transcription request. Without this, a stalled
+/// connection would hold its `max_workers` permit forever, silently freezing
+/// that worker slot for the rest of the pipeline's life.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct GroqBackend {
     client: reqwest::Client,
@@ -23,8 +29,11 @@ impl GroqBackend {
                 config.groq.api_key_env
             )
         })?;
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()?;
         Ok(Self {
-            client: reqwest::Client::new(),
+            client,
             api_key,
             model: config.groq.model.clone(),
             base_url: config.groq.base_url.trim_end_matches('/').to_string(),
