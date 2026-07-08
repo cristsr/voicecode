@@ -77,8 +77,39 @@ fn parse_key(name: &str) -> Option<Key> {
         "space" => Some(Key::Space),
         "ctrl_r" | "control_r" => Some(Key::ControlRight),
         "alt_r" => Some(Key::AltGr),
-        _ => None,
+        other => parse_extended_function_key(other),
     }
+}
+
+/// F13–F24: `rdev` no tiene variantes nombradas para estas (no existen en
+/// teclados comunes, pero sí las emiten teclados programables como un Corne con
+/// capas remapeadas). rdev igual las recibe como `Key::Unknown(código)`; acá les
+/// damos nombre usando el código de tecla virtual de Windows (VK_F13..VK_F24 =
+/// 0x7C..0x87). Esos códigos son específicos de Windows: en Linux (evdev) estos
+/// mismos nombres necesitarían otra tabla de códigos.
+#[cfg(windows)]
+fn parse_extended_function_key(name: &str) -> Option<Key> {
+    let code: u32 = match name {
+        "f13" => 0x7C,
+        "f14" => 0x7D,
+        "f15" => 0x7E,
+        "f16" => 0x7F,
+        "f17" => 0x80,
+        "f18" => 0x81,
+        "f19" => 0x82,
+        "f20" => 0x83,
+        "f21" => 0x84,
+        "f22" => 0x85,
+        "f23" => 0x86,
+        "f24" => 0x87,
+        _ => return None,
+    };
+    Some(Key::Unknown(code))
+}
+
+#[cfg(not(windows))]
+fn parse_extended_function_key(_name: &str) -> Option<Key> {
+    None
 }
 
 #[cfg(test)]
@@ -90,6 +121,14 @@ mod tests {
         assert_eq!(parse_key("f12"), Some(Key::F12));
         assert_eq!(parse_key("F9"), Some(Key::F9));
         assert_eq!(parse_key("space"), Some(Key::Space));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn parses_extended_function_keys_via_windows_vk_codes() {
+        assert_eq!(parse_key("f13"), Some(Key::Unknown(0x7C)));
+        assert_eq!(parse_key("F13"), Some(Key::Unknown(0x7C)));
+        assert_eq!(parse_key("f24"), Some(Key::Unknown(0x87)));
     }
 
     #[test]
