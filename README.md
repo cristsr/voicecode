@@ -133,31 +133,24 @@ cargo run --release
 Aparece un ícono en la bandeja del sistema (menú: *Reiniciar pipeline*, *Salir*).
 Mantené la tecla PTT (`f12` por defecto) para dictar.
 
-## Empaquetado y arranque automático (Windows)
+## Empaquetado y arranque automático
 
-`cargo build --release` produce un único `.exe`. Para que arranque solo al iniciar
-sesión se reutilizan los scripts de Task Scheduler:
+`cargo build --release` produce un único `.exe`. El arranque automático al iniciar
+sesión se deja a cargo del SO (no hay scripts de instalación en el repo):
 
-```powershell
-# desde PowerShell como Administrador
-.\scripts\register_task.ps1 -ExePath "C:\ruta\a\voicecode.exe"
-```
+- **Windows**: acceso directo en `shell:startup`, o una tarea de Task Scheduler.
+- **Linux**: entrada `.desktop` en autostart, o un servicio de usuario systemd.
 
-### Sobre la elevación (UIPI)
+Con el backend local, las DLLs/librerías del runtime CUDA deben ser visibles (en
+`PATH`/`LD_LIBRARY_PATH` o junto al `.exe`).
 
-Windows (UIPI) **solo** bloquea que un proceso escriba en una ventana de **mayor
-integridad**. En la práctica:
+### Sobre la elevación (Windows/UIPI)
 
-- Si tu terminal (p. ej. Claude Code) corre **sin elevar**, VoiceCode **sin elevar
-  pega sin problema** — no hace falta admin.
-- Solo si necesitás pegar en una ventana **elevada** (una terminal abierta *como
-  administrador*), VoiceCode también debe correr elevado. Para eso la tarea
-  programada usa `RunLevel Highest` (arranca elevada al logon, sin prompt de UAC).
-  Un acceso directo en `shell:startup` **no** sirve para esto: arranca con token
-  estándar (no elevado).
-
-Con el backend local, las DLLs del runtime CUDA deben ser visibles (en `PATH` o
-junto al `.exe`).
+UIPI **solo** bloquea que un proceso escriba en una ventana de **mayor integridad**.
+Si tu terminal (p. ej. Claude Code) corre **sin elevar**, VoiceCode sin elevar pega
+sin problema — no hace falta admin. Únicamente para pegar en una ventana **elevada**
+(terminal abierta *como administrador*) VoiceCode debería correr elevado (p. ej. una
+tarea de Task Scheduler con `RunLevel Highest`).
 
 ## Testing
 
@@ -184,7 +177,7 @@ Los logs de whisper.cpp confirman la GPU: `use gpu = 1`,
 ```
 voicecode/
 ├── Cargo.toml · Cargo.lock
-├── config.toml              # configuración (tecla, backend, denoise, model_path...)
+├── config.sample.toml       # plantilla (copiar a config.toml, que va gitignoreado)
 ├── src/                     # crate `voicecode`
 │   ├── main.rs              # entry point + ícono de bandeja
 │   ├── lib.rs               # composition root (run_pipeline)
@@ -192,7 +185,6 @@ voicecode/
 │   └── pipeline/            # listener · recorder · transcriber/ · cleaner · writer
 ├── examples/                # groq_check.rs
 ├── tests/                   # e2e.rs · local_gpu.rs (integración GPU, se salta sin modelo)
-├── scripts/                 # register_task.ps1 · unregister_task.ps1 (Task Scheduler)
 └── models/                  # modelos GGML (.bin), no versionados
 ```
 
