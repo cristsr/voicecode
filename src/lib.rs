@@ -45,6 +45,7 @@ pub async fn run_pipeline(config: Config) -> anyhow::Result<()> {
     let (audio_tx, audio_rx) = mpsc::channel(16);
     let (text_tx, text_rx) = mpsc::channel(16);
     let (clean_tx, clean_rx) = mpsc::channel(16);
+    let (warmup_tx, mut warmup_rx) = mpsc::channel::<()>(1);
 
     let listener = PttListener::new(&config.ptt.key)?;
     let mut recorder = Recorder::new(
@@ -52,7 +53,18 @@ pub async fn run_pipeline(config: Config) -> anyhow::Result<()> {
         config.audio.channels,
         config.audio.min_audio_duration_ms,
         Arc::new(CpalInput::new(config.audio.denoise)),
+        warmup_tx,
     );
+    // Re-warms the backend on every PTT key-down (see `Recorder`), so a model
+    // reload after an idle-unload overlaps with the user speaking instead of
+    // starting only once they release the key. Cheap no-op once already
+    // loaded, and a no-op altogether for stateless backends (e.g. Groq).
+    let warmup_backend = backend.clone();
+    let warmup_task = async move {
+        while warmup_rx.recv().await.is_some() {
+            warmup_backend.warm_up().await;
+        }
+    };
     let transcriber = WhisperTranscriber::new(
         backend,
         config.whisper.language.clone(),
@@ -78,6 +90,7 @@ pub async fn run_pipeline(config: Config) -> anyhow::Result<()> {
         transcriber.monitor_idle(),
         cleaner.run(text_rx, clean_tx),
         writer.run(clean_rx),
+        warmup_task,
     );
 
     Ok(())

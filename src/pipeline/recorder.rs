@@ -18,6 +18,10 @@ pub struct Recorder {
     channels: u16,
     min_audio_duration_ms: u32,
     input: Arc<dyn AudioInput>,
+    /// Pinged on every genuine key-down (not key-repeat) so the transcription
+    /// backend can start reloading its model, if idle-unloaded, in parallel
+    /// with the user speaking instead of after they release the key.
+    warmup_tx: mpsc::Sender<()>,
     seq: u64,
     recording: bool,
 }
@@ -28,12 +32,14 @@ impl Recorder {
         channels: u16,
         min_audio_duration_ms: u32,
         input: Arc<dyn AudioInput>,
+        warmup_tx: mpsc::Sender<()>,
     ) -> Self {
         Self {
             sample_rate,
             channels,
             min_audio_duration_ms,
             input,
+            warmup_tx,
             seq: 0,
             recording: false,
         }
@@ -58,6 +64,9 @@ impl Recorder {
             tracing::debug!("Ignoring duplicate key-down while already recording (key repeat)");
             return;
         }
+        // Fire-and-forget: a full channel or no receiver just means a warm-up
+        // is already in flight or the backend does not need one (e.g. Groq).
+        let _ = self.warmup_tx.try_send(());
         match self.input.start(self.sample_rate, self.channels) {
             Ok(()) => self.recording = true,
             Err(error) => tracing::error!(%error, "failed to start audio capture"),
@@ -307,7 +316,14 @@ mod tests {
     }
 
     fn recorder(samples: Vec<f32>, starts: Arc<AtomicUsize>) -> Recorder {
-        Recorder::new(16000, 1, 300, Arc::new(FakeInput { samples, starts }))
+        let (warmup_tx, _warmup_rx) = mpsc::channel(1);
+        Recorder::new(
+            16000,
+            1,
+            300,
+            Arc::new(FakeInput { samples, starts }),
+            warmup_tx,
+        )
     }
 
     fn down() -> KeyEvent {

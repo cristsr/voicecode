@@ -119,6 +119,14 @@ impl LocalWhisper {
             ctx,
             states: Mutex::new(Vec::new()),
         });
+        // Pre-create one state so the first real transcription does not also
+        // pay the ~700MB GPU buffer allocation on top of the model load.
+        match loaded.checkout_state() {
+            Ok(state) => loaded.checkin_state(state),
+            Err(error) => tracing::warn!(%error, "failed to pre-create initial Whisper state"),
+        }
+        tracing::info!("Whisper model preloaded");
+
         let mut inner = self.inner.lock().unwrap();
         inner.loaded = Some(loaded.clone());
         inner.active += 1;
@@ -210,17 +218,13 @@ impl TranscriptionBackend for LocalWhisper {
     }
 
     async fn warm_up(&self) {
+        // Called both at startup and on every PTT key-down (see
+        // `Recorder`), so the model reload after an idle-unload overlaps
+        // with the user speaking instead of happening after they release the
+        // key. `acquire()` logs and does real work only the first time (the
+        // actual load); once loaded, this is just a cheap refcount bump.
         match self.acquire().await {
-            Ok(loaded) => {
-                // Also pre-create one state so the first real dictation does
-                // not pay the ~700MB GPU buffer allocation either.
-                match loaded.checkout_state() {
-                    Ok(state) => loaded.checkin_state(state),
-                    Err(error) => tracing::error!(%error, "failed to preload Whisper state"),
-                }
-                self.release();
-                tracing::info!("Whisper model preloaded");
-            }
+            Ok(_) => self.release(),
             Err(error) => tracing::error!(%error, "failed to preload Whisper model"),
         }
     }
