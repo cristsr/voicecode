@@ -1,11 +1,11 @@
-//! Limpieza de texto (== `pipeline/cleaner.py`).
+//! Text cleaning stage: strips filler words and tidies the transcription.
 
 use regex::{Regex, RegexBuilder};
 use tokio::sync::mpsc;
 
 use crate::domain::models::{CleanText, TranscribedText};
 
-/// Compila los patrones de muletillas como regex case-insensitive.
+/// Compiles the filler-word patterns as case-insensitive regexes.
 pub fn compile_patterns(patterns: &[String]) -> anyhow::Result<Vec<Regex>> {
     patterns
         .iter()
@@ -18,17 +18,16 @@ pub fn compile_patterns(patterns: &[String]) -> anyhow::Result<Vec<Regex>> {
         .collect()
 }
 
-/// Remueve muletillas, colapsa espacios, limpia puntuación colgante inicial y
-/// capitaliza la primera letra. Función pura (== `clean_text` de Python).
+/// Pure text cleaner: removes filler words, collapses whitespace, strips
+/// dangling leading punctuation and capitalizes the first letter.
 pub fn clean_text(raw: &str, filler_patterns: &[Regex]) -> String {
     let mut result = raw.to_string();
     for pattern in filler_patterns {
         result = pattern.replace_all(&result, "").into_owned();
     }
-    // Colapsar espacios en blanco y recortar.
     result = collapse_whitespace(&result);
-    // Quitar una muletilla suele dejar una coma/;/: colgante al inicio
-    // (p. ej. "eh, quiero" -> ", quiero"); se elimina antes de capitalizar.
+    // Removing a filler often leaves a dangling leading ",/;/:"
+    // (e.g. "eh, quiero" -> ", quiero"); drop it before capitalizing.
     result = strip_leading_punctuation(&result);
     capitalize_first(&result)
 }
@@ -49,7 +48,7 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
-/// Etapa del pipeline: consume `TranscribedText` y produce `CleanText`.
+/// Pipeline stage: consumes `TranscribedText` and produces `CleanText`.
 pub struct RegexCleaner {
     patterns: Vec<Regex>,
 }

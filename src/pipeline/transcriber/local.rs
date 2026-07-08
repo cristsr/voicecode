@@ -1,11 +1,9 @@
-//! Backend de transcripción local con whisper.cpp (vía `whisper-rs`).
+//! Local transcription backend using whisper.cpp (via `whisper-rs`).
 //!
-//! Replica la optimización del proyecto Python: carga perezosa del modelo y
-//! descarga de la GPU tras un periodo de inactividad (== `_acquire_model` /
-//! `_release_model` / `_maybe_unload` / `monitor_idle`). La inferencia es
-//! bloqueante, así que corre en `spawn_blocking` (== `run_in_executor`).
+//! The model is loaded lazily and unloaded from the GPU after an idle period.
+//! Inference is blocking, so it runs on `spawn_blocking`.
 //!
-//! Requiere compilar con `--features local` (necesita CMake y toolchain CUDA).
+//! Requires building with `--features local` (needs CMake and a CUDA toolchain).
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,9 +15,9 @@ use crate::config::Config;
 use crate::domain::traits::TranscriptionBackend;
 
 struct Inner {
-    /// `None` mientras el modelo está descargado (carga perezosa).
+    /// `None` while the model is unloaded (lazy loading).
     ctx: Option<Arc<WhisperContext>>,
-    /// Transcripciones en curso; el modelo no se descarga si es > 0.
+    /// In-flight transcriptions; the model is not unloaded while this is > 0.
     active: usize,
     last_used: Instant,
 }
@@ -28,8 +26,8 @@ pub struct LocalWhisper {
     model_path: String,
     idle_unload: Duration,
     inner: Mutex<Inner>,
-    /// Serializa la carga del modelo para no cargarlo dos veces si llegan varias
-    /// transcripciones a la vez con el modelo descargado.
+    /// Serializes model loading so it is not loaded twice when several
+    /// transcriptions arrive at once with the model unloaded.
     load_lock: tokio::sync::Mutex<()>,
 }
 
@@ -37,9 +35,7 @@ impl LocalWhisper {
     pub fn from_config(config: &Config) -> anyhow::Result<Self> {
         let model_path = config.whisper.model_path.clone();
         if model_path.is_empty() {
-            anyhow::bail!(
-                "backend local: definí [whisper] model_path con la ruta al modelo ggml (.bin)"
-            );
+            anyhow::bail!("local backend: set [whisper] model_path to the ggml (.bin) model path");
         }
         Ok(Self {
             model_path,
@@ -53,28 +49,28 @@ impl LocalWhisper {
         })
     }
 
-    /// Devuelve el contexto (cargándolo bajo demanda) y marca una transcripción
-    /// en curso para que el monitor no lo descargue mientras tanto.
+    /// Returns the context (loading it on demand) and marks a transcription in
+    /// flight so the monitor does not unload it in the meantime.
     ///
-    /// La carga (varios segundos en GPU) corre en `spawn_blocking` para no bloquear
-    /// el runtime, y se serializa con `load_lock`; el `std::Mutex` de `inner` nunca
-    /// se sostiene durante la carga ni cruza un `.await`, así las grabaciones que
-    /// lleguen mientras carga se encolan y se procesan (no se pierden).
+    /// Loading (several seconds on GPU) runs on `spawn_blocking` and is
+    /// serialized with `load_lock`. The `std::Mutex` on `inner` is never held
+    /// during the load nor across an `.await`, so recordings arriving while it
+    /// loads are queued and processed rather than lost.
     async fn acquire(&self) -> anyhow::Result<Arc<WhisperContext>> {
-        // Camino rápido: ya está cargado.
+        // Fast path: already loaded.
         if let Some(ctx) = self.loaded_ctx() {
             return Ok(ctx);
         }
-        // Camino lento: cargar. Serializado para evitar doble carga.
+        // Slow path: load. Serialized to avoid a double load.
         let _guard = self.load_lock.lock().await;
-        // Re-chequear: otra tarea pudo cargarlo mientras esperábamos el lock.
+        // Re-check: another task may have loaded it while we waited for the lock.
         if let Some(ctx) = self.loaded_ctx() {
             return Ok(ctx);
         }
         let path = self.model_path.clone();
         tracing::info!(path = %path, "Loading Whisper model (GPU-first)");
-        // GPU-first: usa la GPU si whisper.cpp se compiló con soporte (feature
-        // `cuda`) y hay dispositivo; si no, cae a CPU. Sin feature GPU es no-op.
+        // GPU-first: uses the GPU when whisper.cpp was built with the `cuda`
+        // feature and a device exists; otherwise falls back to CPU.
         let ctx = tokio::task::spawn_blocking(move || {
             let mut params = WhisperContextParameters::default();
             params.use_gpu(true);
@@ -90,8 +86,8 @@ impl LocalWhisper {
         Ok(ctx)
     }
 
-    /// Si el modelo está cargado, cuenta una transcripción en curso y devuelve el
-    /// contexto; si no, `None`.
+    /// When the model is loaded, counts an in-flight transcription and returns
+    /// the context; otherwise `None`.
     fn loaded_ctx(&self) -> Option<Arc<WhisperContext>> {
         let mut inner = self.inner.lock().unwrap();
         let ctx = inner.ctx.clone()?;
@@ -106,7 +102,7 @@ impl LocalWhisper {
     }
 }
 
-/// Inferencia bloqueante (se ejecuta en un thread de `spawn_blocking`).
+/// Blocking inference (runs on a `spawn_blocking` thread).
 fn run_inference(ctx: &WhisperContext, audio: &[f32], language: &str) -> anyhow::Result<String> {
     let mut state = ctx.create_state()?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
@@ -141,7 +137,7 @@ impl TranscriptionBackend for LocalWhisper {
         let joined =
             tokio::task::spawn_blocking(move || run_inference(&ctx, &audio, &language)).await;
 
-        // Liberar SIEMPRE, aunque la inferencia falle (== try/finally).
+        // Always release, even if inference failed.
         self.release();
         joined?
     }
@@ -161,7 +157,7 @@ impl TranscriptionBackend for LocalWhisper {
         let idle = inner.last_used.elapsed();
         if inner.ctx.is_some() && inner.active == 0 && idle >= self.idle_unload {
             tracing::info!("Unloading idle Whisper model after {:?}", idle);
-            // Soltar la referencia libera la VRAM al destruirse el contexto.
+            // Dropping the reference frees the VRAM when the context is destroyed.
             inner.ctx = None;
             true
         } else {

@@ -1,10 +1,9 @@
-//! Etapa de transcripción (== `pipeline/transcriber.py`).
+//! Transcription stage.
 //!
-//! Igual que en Python, cada chunk se transcribe en una task independiente
-//! (permitiendo solapamiento y finalización fuera de orden; el `SequenceBuffer`
-//! del writer reordena). La concurrencia se acota con un `Semaphore`
-//! (== `transcriber_max_workers`), y las tasks en vuelo se rastrean en un
-//! `JoinSet` (== el set `self._tasks`) para drenarlas al cerrar.
+//! Each chunk is transcribed on its own task, allowing overlap and out-of-order
+//! completion (the writer's `SequenceBuffer` reorders). Concurrency is bounded
+//! by a `Semaphore` (`max_workers`), and in-flight tasks are tracked in a
+//! `JoinSet` so they can be drained on shutdown.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +21,7 @@ pub mod groq;
 #[cfg(feature = "local")]
 pub mod local;
 
-/// Cada cuánto revisa el monitor si el backend lleva demasiado tiempo ocioso.
+/// How often the idle monitor checks whether the backend can be unloaded.
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct WhisperTranscriber {
@@ -58,14 +57,14 @@ impl WhisperTranscriber {
                 maybe_chunk = audio_rx.recv() => {
                     match maybe_chunk {
                         Some(chunk) => self.spawn_transcription(&mut tasks, chunk, &text_tx),
-                        None => break, // canal cerrado: no llegan más chunks
+                        None => break, // channel closed: no more chunks
                     }
                 }
-                // Recolecta tasks completadas para no acumular handles.
+                // Reap finished tasks so handles do not accumulate.
                 Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
             }
         }
-        // Drena las transcripciones en vuelo antes de terminar.
+        // Drain in-flight transcriptions before finishing.
         while tasks.join_next().await.is_some() {}
     }
 
@@ -101,8 +100,8 @@ impl WhisperTranscriber {
         });
     }
 
-    /// Descarga el modelo del backend cuando lleva demasiado tiempo ocioso.
-    /// No hace nada si el idle-unload está deshabilitado.
+    /// Unloads the backend model once it has been idle for too long. Does
+    /// nothing when idle-unload is disabled.
     pub async fn monitor_idle(&self) {
         if !self.idle_enabled {
             return;
@@ -114,8 +113,8 @@ impl WhisperTranscriber {
     }
 }
 
-/// Construye el backend indicado en `config`, fallando con un mensaje claro si
-/// no fue compilado (feature apagada).
+/// Builds the backend selected in `config`, failing with a clear message when
+/// it was not compiled in (feature disabled).
 pub fn build_backend(config: &Config) -> anyhow::Result<Arc<dyn TranscriptionBackend>> {
     match config.transcriber.backend {
         Backend::Groq => {
@@ -125,7 +124,7 @@ pub fn build_backend(config: &Config) -> anyhow::Result<Arc<dyn TranscriptionBac
             }
             #[cfg(not(feature = "groq"))]
             {
-                anyhow::bail!("backend 'groq' no está compilado (recompila con --features groq)")
+                anyhow::bail!("backend 'groq' is not compiled in (rebuild with --features groq)")
             }
         }
         Backend::Local => {
@@ -135,7 +134,7 @@ pub fn build_backend(config: &Config) -> anyhow::Result<Arc<dyn TranscriptionBac
             }
             #[cfg(not(feature = "local"))]
             {
-                anyhow::bail!("backend 'local' no está compilado (recompila con --features local)")
+                anyhow::bail!("backend 'local' is not compiled in (rebuild with --features local)")
             }
         }
     }
@@ -188,7 +187,7 @@ mod tests {
         for c in chunks {
             atx.send(c).await.unwrap();
         }
-        drop(atx); // cierra el canal -> run() drena y retorna
+        drop(atx); // close the channel -> run() drains and returns
         transcriber.run(arx, ttx).await;
         let mut out = Vec::new();
         while let Ok(item) = trx.try_recv() {
@@ -217,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn survives_backend_error() {
-        // No debe colgarse ni paniquear; simplemente descarta el chunk.
+        // Must neither hang nor panic; it just drops the chunk.
         let out = drain(Arc::new(ErrorBackend), vec![chunk(0)]).await;
         assert!(out.is_empty());
     }

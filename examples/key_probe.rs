@@ -1,16 +1,16 @@
-//! Diagnóstico: imprime cada evento de teclado que rdev detecta, con su nombre y
-//! (para teclas sin variante nombrada) el código crudo `Unknown(n)`. Corré esto y
-//! presioná la tecla PTT para ver exactamente qué evento genera el teclado.
+//! Diagnostic tool: prints every keyboard event `rdev` detects, with its name
+//! or, for keys without a named variant, the raw `Unknown(n)` code. Run this
+//! and press the PTT key to see exactly what event the keyboard generates.
 //!
 //!   cargo run --example key_probe
 
 fn main() {
-    println!("Escuchando teclado global. Presioná la tecla PTT (Ctrl+C para salir)...");
+    println!("Listening globally. Press the PTT key (Ctrl+C to quit)...");
     if let Err(error) = rdev::listen(|event| match event.event_type {
         rdev::EventType::KeyPress(key) => println!("KeyPress: {key:?}"),
         rdev::EventType::KeyRelease(key) => println!("KeyRelease: {key:?}"),
         _ => {}
     }) {
-        eprintln!("Error escuchando teclado: {error:?}");
+        eprintln!("Error listening to keyboard: {error:?}");
     }
 }

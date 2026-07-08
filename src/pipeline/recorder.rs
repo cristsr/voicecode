@@ -1,9 +1,9 @@
-//! Grabación de audio (== `pipeline/recorder.py`).
+//! Audio recording stage.
 //!
-//! El `Recorder` es agnóstico del hardware: recibe una `AudioInput` inyectable.
-//! La impl real (`CpalInput`) corre `cpal` en un thread dedicado que es el único
-//! dueño del `Stream` (que es `!Send`), controlado por comandos — así el
-//! `Recorder` puede vivir tranquilamente en una task de Tokio.
+//! The `Recorder` is hardware-agnostic: it takes an injectable `AudioInput`.
+//! The real implementation (`CpalInput`) drives `cpal` on a dedicated thread
+//! that solely owns the `!Send` `Stream` and is controlled via commands, so the
+//! `Recorder` itself can live on a Tokio task.
 
 use std::sync::{Arc, Mutex};
 
@@ -54,7 +54,7 @@ impl Recorder {
 
     fn start_recording(&mut self) {
         if self.recording {
-            // Key-repeat del OS: ignorar un `down` extra mientras ya grabamos.
+            // OS key-repeat: ignore an extra `down` while already recording.
             tracing::debug!("Ignoring duplicate key-down while already recording (key repeat)");
             return;
         }
@@ -96,25 +96,25 @@ impl Recorder {
     }
 }
 
-// --- Implementación real con cpal ---
+// --- Real cpal-backed implementation ---
 
 enum Command {
-    /// `sample_rate` es el objetivo (16 kHz); el micro se abre en su config nativa
-    /// y se resamplea a esta tasa. La salida siempre es mono (downmix), así que no
-    /// se transporta un conteo de canales objetivo.
+    /// `sample_rate` is the target (16 kHz); the mic opens in its native config
+    /// and is resampled to this rate. Output is always mono (downmixed), so no
+    /// target channel count is carried.
     Start {
         sample_rate: u32,
     },
     Stop(std::sync::mpsc::Sender<Vec<f32>>),
 }
 
-/// Fuente de audio real. Delega en un thread dedicado que posee el `cpal::Stream`.
+/// Real audio source. Delegates to a dedicated thread that owns the `cpal::Stream`.
 pub struct CpalInput {
     tx: std::sync::mpsc::Sender<Command>,
 }
 
 impl CpalInput {
-    /// `denoise`: aplica supresión de ruido (RNNoise) al soltar la tecla.
+    /// `denoise`: apply RNNoise suppression when the key is released.
     pub fn new(denoise: bool) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<Command>();
         std::thread::spawn(move || audio_thread(rx, denoise));
@@ -130,8 +130,8 @@ impl Default for CpalInput {
 
 impl AudioInput for CpalInput {
     fn start(&self, sample_rate: u32, _channels: u16) -> anyhow::Result<()> {
-        // La salida es siempre mono, así que el conteo de canales objetivo se
-        // ignora; el downmix ocurre en el thread según los canales nativos.
+        // Output is always mono, so the target channel count is ignored; the
+        // downmix happens on the thread based on the native channel count.
         self.tx
             .send(Command::Start { sample_rate })
             .map_err(|_| anyhow::anyhow!("audio thread is not running"))?;
@@ -149,24 +149,23 @@ impl AudioInput for CpalInput {
     }
 }
 
-/// Loop del thread de audio: el único dueño del `cpal::Stream`.
+/// Audio thread loop: the sole owner of the `cpal::Stream`.
 ///
-/// El micrófono se abre en su **configuración nativa** (en Windows/WASAPI el
-/// dispositivo suele estar fijo a p. ej. 48 kHz estéreo f32 y rechaza pedidos de
-/// 16 kHz mono). Las muestras se acumulan intercaladas en f32 y, al parar, se
-/// hace downmix a mono + resample al `sample_rate` objetivo que pide el pipeline
-/// (== lo que hacía PortAudio por dentro en el proyecto Python).
+/// The microphone opens in its **native configuration** (on Windows/WASAPI the
+/// device is often fixed to e.g. 48 kHz stereo f32 and rejects 16 kHz mono
+/// requests). Samples accumulate interleaved as f32 and, on stop, are downmixed
+/// to mono and resampled to the target `sample_rate` the pipeline requests.
 fn audio_thread(rx: std::sync::mpsc::Receiver<Command>, denoise: bool) {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
     use crate::utils::audio::{denoise_48k_mono, downmix_to_mono, resample_linear};
 
-    /// RNNoise fue entrenado a 48 kHz; el denoise se hace siempre a esta tasa.
+    /// RNNoise was trained at 48 kHz; denoising always runs at this rate.
     const RNNOISE_RATE: u32 = 48_000;
 
     let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
     let mut stream: Option<cpal::Stream> = None;
-    // Config nativa con la que quedó abierto el stream y target pedido en Start.
+    // Native config the stream was opened with, plus the target from Start.
     let mut native_rate: u32 = 0;
     let mut native_channels: u16 = 1;
     let mut target_rate: u32 = 16_000;
@@ -183,8 +182,8 @@ fn audio_thread(rx: std::sync::mpsc::Receiver<Command>, denoise: bool) {
                         continue;
                     }
                 };
-                // Config nativa soportada por el dispositivo (evita el error
-                // "stream configuration is not supported by the device").
+                // Native config supported by the device (avoids the
+                // "stream configuration is not supported by the device" error).
                 let supported = match device.default_input_config() {
                     Ok(config) => config,
                     Err(error) => {
@@ -214,13 +213,13 @@ fn audio_thread(rx: std::sync::mpsc::Receiver<Command>, denoise: bool) {
                 }
             }
             Command::Stop(reply) => {
-                drop(stream.take()); // drop del stream -> detiene la captura
+                drop(stream.take()); // dropping the stream stops capture
                 let interleaved = std::mem::take(&mut *buffer.lock().unwrap());
                 let mono = downmix_to_mono(&interleaved, native_channels);
                 let out = if denoise {
-                    // RNNoise trabaja a 48 kHz: resamplear a 48k, limpiar y luego
-                    // bajar al target. Si el micro ya es 48k, el primer resample
-                    // es una copia barata.
+                    // RNNoise runs at 48 kHz: resample up, clean, then down to
+                    // the target. When the mic is already 48 kHz the first
+                    // resample is a cheap copy.
                     let at_48k = resample_linear(&mono, native_rate, RNNOISE_RATE);
                     let clean = denoise_48k_mono(&at_48k);
                     resample_linear(&clean, RNNOISE_RATE, target_rate)
@@ -233,8 +232,8 @@ fn audio_thread(rx: std::sync::mpsc::Receiver<Command>, denoise: bool) {
     }
 }
 
-/// Construye el stream de captura convirtiendo el formato nativo del dispositivo
-/// (f32/i16/u16) a `f32` intercalado en `buffer`.
+/// Builds the capture stream, converting the device's native sample format
+/// (f32/i16/u16) into interleaved `f32` in `buffer`.
 fn build_capture_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -343,7 +342,7 @@ mod tests {
     #[tokio::test]
     async fn discards_recording_shorter_than_minimum() {
         let starts = Arc::new(AtomicUsize::new(0));
-        // 160 muestras a 16 kHz = 10 ms < 300 ms.
+        // 160 samples at 16 kHz = 10 ms < 300 ms.
         let rec = recorder(vec![0.0; 160], starts.clone());
         let out = run_events(rec, vec![down(), up()]).await;
         assert!(out.is_empty());
@@ -355,7 +354,7 @@ mod tests {
         let rec = recorder(vec![0.0; 16000], starts.clone());
         let out = run_events(rec, vec![down(), down(), up()]).await;
         assert_eq!(out.len(), 1);
-        // Solo se inició la captura una vez pese a los dos `down`.
+        // Capture started only once despite the two `down` events.
         assert_eq!(starts.load(Ordering::SeqCst), 1);
     }
 

@@ -1,8 +1,8 @@
-//! Escritura del texto en la ventana activa (== `pipeline/writer.py`).
+//! Writes the text into the active window.
 //!
-//! Igual que en Python, la lógica pura de reordenamiento (`SequenceBuffer`) está
-//! separada de la I/O real de portapapeles/teclado, para poder testear el
-//! algoritmo (la parte con más casos borde) sin tocar `enigo`/`arboard`.
+//! The pure reordering logic (`SequenceBuffer`) is separated from the real
+//! clipboard/keyboard I/O so the algorithm (the part with the most edge cases)
+//! can be tested without touching `enigo`/`arboard`.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use crate::domain::models::CleanText;
 use crate::domain::traits::{Clipboard, Keyboard};
 
-/// Reordena `CleanText` que llegan fuera de orden y los libera en orden de `seq`.
+/// Reorders `CleanText` arriving out of order and releases them by `seq`.
 #[derive(Default)]
 pub struct SequenceBuffer {
     expected_seq: u64,
@@ -24,7 +24,7 @@ impl SequenceBuffer {
         Self::default()
     }
 
-    /// Procesa un item y devuelve los que ya están listos, en orden contiguo.
+    /// Processes an item and returns those now ready, in contiguous order.
     pub fn process(&mut self, item: CleanText) -> Vec<CleanText> {
         let mut ready = Vec::new();
         if item.seq == self.expected_seq {
@@ -41,7 +41,7 @@ impl SequenceBuffer {
     }
 }
 
-/// Etapa del pipeline: reordena y pega cada texto simulando Ctrl+V.
+/// Pipeline stage: reorders and pastes each text by simulating Ctrl+V.
 pub struct ClipboardWriter {
     keyboard: Box<dyn Keyboard>,
     clipboard: Box<dyn Clipboard>,
@@ -67,8 +67,8 @@ impl ClipboardWriter {
         while let Some(item) = clean_rx.recv().await {
             for ready in self.buffer.process(item) {
                 if ready.text.is_empty() {
-                    // Texto vacío (audio que era pura muletilla): se saltea el
-                    // pegado, pero el `seq` ya avanzó en el buffer.
+                    // Empty text (audio that was pure filler): skip the paste,
+                    // but the `seq` has already advanced in the buffer.
                     tracing::info!(seq = ready.seq, "Skipping empty clean text");
                 } else if let Err(error) = self.emit(&ready.text).await {
                     tracing::error!(%error, seq = ready.seq, "clipboard emit failed");
@@ -78,7 +78,7 @@ impl ClipboardWriter {
     }
 
     async fn emit(&mut self, text: &str) -> anyhow::Result<()> {
-        // Backup del portapapeles; se restaura SIEMPRE (== try/finally).
+        // Back up the clipboard; it is always restored, even on failure.
         let backup = self.clipboard.get_text().unwrap_or_default();
 
         let set_res = self.clipboard.set_text(text);
@@ -97,10 +97,10 @@ impl ClipboardWriter {
     }
 }
 
-// --- Implementaciones reales (crean el handle por llamada para ser Send+Sync
-// sin retener nada entre `.await`s). ---
+// --- Real implementations (a fresh handle per call keeps them Send+Sync
+// without holding anything across `.await`s). ---
 
-/// Portapapeles del sistema vía `arboard`.
+/// System clipboard via `arboard`.
 pub struct SystemClipboard;
 
 impl Clipboard for SystemClipboard {
@@ -114,10 +114,10 @@ impl Clipboard for SystemClipboard {
     }
 }
 
-/// Teclado del sistema vía `enigo`. Simula Ctrl+V.
+/// System keyboard via `enigo`. Simulates Ctrl+V.
 ///
-/// Nota heredada del proyecto Python: por UIPI, esto NO inyecta en ventanas
-/// elevadas si el proceso no corre elevado (mismo requisito que con `pynput`).
+/// Note: due to Windows UIPI this does NOT inject into elevated windows unless
+/// the process itself runs elevated.
 pub struct SystemKeyboard;
 
 impl Keyboard for SystemKeyboard {
@@ -157,7 +157,7 @@ mod tests {
         let mut buf = SequenceBuffer::new();
         assert_eq!(buf.process(clean(1, "b")), vec![]);
         assert_eq!(buf.process(clean(2, "c")), vec![]);
-        // Al llegar el 0 se drena 0,1,2 en orden.
+        // Once 0 arrives, 0,1,2 drain in order.
         assert_eq!(
             buf.process(clean(0, "a")),
             vec![clean(0, "a"), clean(1, "b"), clean(2, "c")]
@@ -169,7 +169,7 @@ mod tests {
         let mut buf = SequenceBuffer::new();
         buf.process(clean(1, "b"));
         buf.process(clean(3, "d"));
-        // Llega 0 -> drena 0,1 pero se detiene (falta el 2).
+        // 0 arrives -> drains 0,1 but stops (2 is missing).
         assert_eq!(
             buf.process(clean(0, "a")),
             vec![clean(0, "a"), clean(1, "b")]
@@ -212,16 +212,15 @@ mod tests {
         let mut writer = ClipboardWriter::new(Box::new(kb), Box::new(cb.clone()), 50);
         let (tx, rx) = mpsc::channel(8);
 
-        // seq 0 vacío (se saltea), seq 1 con texto (se pega).
+        // seq 0 empty (skipped), seq 1 with text (pasted).
         tx.send(clean(0, "")).await.unwrap();
         tx.send(clean(1, "hola")).await.unwrap();
         drop(tx);
 
         writer.run(rx).await;
 
-        // Solo un paste (el de seq 1), pese a que seq 0 llegó primero.
+        // Only one paste (seq 1), even though seq 0 arrived first.
         assert_eq!(*pastes.lock().unwrap(), 1);
-        // El texto pegado fue el de seq 1.
         assert!(cb.set_values.lock().unwrap().iter().any(|v| v == "hola"));
     }
 }
