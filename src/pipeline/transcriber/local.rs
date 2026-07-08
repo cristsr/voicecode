@@ -9,14 +9,42 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 use crate::config::Config;
 use crate::domain::traits::TranscriptionBackend;
 
+/// A loaded model together with a pool of inference states for it.
+///
+/// Creating a `WhisperState` allocates ~700MB of GPU buffers (KV cache +
+/// compute buffers), so states are checked out of the pool and returned after
+/// use instead of being recreated on every transcription. The pool lives and
+/// dies with this `Arc`: when the model is idle-unloaded (`Inner::loaded` set
+/// to `None`) and no in-flight call still holds a clone of it, dropping the
+/// last reference frees both the pooled states and the context's VRAM.
+struct LoadedModel {
+    ctx: WhisperContext,
+    states: Mutex<Vec<WhisperState>>,
+}
+
+impl LoadedModel {
+    fn checkout_state(&self) -> anyhow::Result<WhisperState> {
+        if let Some(state) = self.states.lock().unwrap().pop() {
+            return Ok(state);
+        }
+        Ok(self.ctx.create_state()?)
+    }
+
+    fn checkin_state(&self, state: WhisperState) {
+        self.states.lock().unwrap().push(state);
+    }
+}
+
 struct Inner {
     /// `None` while the model is unloaded (lazy loading).
-    ctx: Option<Arc<WhisperContext>>,
+    loaded: Option<Arc<LoadedModel>>,
     /// In-flight transcriptions; the model is not unloaded while this is > 0.
     active: usize,
     last_used: Instant,
@@ -33,6 +61,13 @@ pub struct LocalWhisper {
 
 impl LocalWhisper {
     pub fn from_config(config: &Config) -> anyhow::Result<Self> {
+        // Redirects whisper.cpp/GGML's native diagnostic logs (backend
+        // selection, VRAM allocation, CUDA init failures) into `tracing`,
+        // where they land in the same log the rest of the app uses. Without
+        // this they print to stderr, which does not exist in the windowless
+        // release build. Idempotent: safe if called more than once.
+        whisper_rs::install_logging_hooks();
+
         let model_path = config.whisper.model_path.clone();
         if model_path.is_empty() {
             anyhow::bail!("local backend: set [whisper] model_path to the ggml (.bin) model path");
@@ -41,7 +76,7 @@ impl LocalWhisper {
             model_path,
             idle_unload: Duration::from_secs(config.transcriber.idle_unload_seconds),
             inner: Mutex::new(Inner {
-                ctx: None,
+                loaded: None,
                 active: 0,
                 last_used: Instant::now(),
             }),
@@ -49,23 +84,24 @@ impl LocalWhisper {
         })
     }
 
-    /// Returns the context (loading it on demand) and marks a transcription in
-    /// flight so the monitor does not unload it in the meantime.
+    /// Returns the loaded model (loading it on demand) and marks a
+    /// transcription in flight so the monitor does not unload it in the
+    /// meantime.
     ///
     /// Loading (several seconds on GPU) runs on `spawn_blocking` and is
     /// serialized with `load_lock`. The `std::Mutex` on `inner` is never held
     /// during the load nor across an `.await`, so recordings arriving while it
     /// loads are queued and processed rather than lost.
-    async fn acquire(&self) -> anyhow::Result<Arc<WhisperContext>> {
+    async fn acquire(&self) -> anyhow::Result<Arc<LoadedModel>> {
         // Fast path: already loaded.
-        if let Some(ctx) = self.loaded_ctx() {
-            return Ok(ctx);
+        if let Some(loaded) = self.loaded_model() {
+            return Ok(loaded);
         }
         // Slow path: load. Serialized to avoid a double load.
         let _guard = self.load_lock.lock().await;
         // Re-check: another task may have loaded it while we waited for the lock.
-        if let Some(ctx) = self.loaded_ctx() {
-            return Ok(ctx);
+        if let Some(loaded) = self.loaded_model() {
+            return Ok(loaded);
         }
         let path = self.model_path.clone();
         tracing::info!(path = %path, "Loading Whisper model (GPU-first)");
@@ -79,20 +115,23 @@ impl LocalWhisper {
         .await
         .map_err(|error| anyhow::anyhow!("model load task panicked: {error}"))??;
 
-        let ctx = Arc::new(ctx);
+        let loaded = Arc::new(LoadedModel {
+            ctx,
+            states: Mutex::new(Vec::new()),
+        });
         let mut inner = self.inner.lock().unwrap();
-        inner.ctx = Some(ctx.clone());
+        inner.loaded = Some(loaded.clone());
         inner.active += 1;
-        Ok(ctx)
+        Ok(loaded)
     }
 
     /// When the model is loaded, counts an in-flight transcription and returns
-    /// the context; otherwise `None`.
-    fn loaded_ctx(&self) -> Option<Arc<WhisperContext>> {
+    /// it; otherwise `None`.
+    fn loaded_model(&self) -> Option<Arc<LoadedModel>> {
         let mut inner = self.inner.lock().unwrap();
-        let ctx = inner.ctx.clone()?;
+        let loaded = inner.loaded.clone()?;
         inner.active += 1;
-        Some(ctx)
+        Some(loaded)
     }
 
     fn release(&self) {
@@ -114,9 +153,10 @@ fn inference_thread_count() -> i32 {
     available.saturating_sub(2).max(1) as i32
 }
 
-/// Blocking inference (runs on a `spawn_blocking` thread).
-fn run_inference(ctx: &WhisperContext, audio: &[f32], language: &str) -> anyhow::Result<String> {
-    let mut state = ctx.create_state()?;
+/// Blocking inference (runs on a `spawn_blocking` thread). `state` is checked
+/// out of (and, by the caller, back into) the model's state pool rather than
+/// created fresh each call.
+fn run_inference(state: &mut WhisperState, audio: &[f32], language: &str) -> anyhow::Result<String> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_language(Some(language));
     params.set_n_threads(inference_thread_count());
@@ -143,21 +183,41 @@ impl TranscriptionBackend for LocalWhisper {
         _sample_rate: u32,
         language: &str,
     ) -> anyhow::Result<String> {
-        let ctx = self.acquire().await?;
+        let loaded = self.acquire().await?;
+        let state = loaded.checkout_state()?;
         let audio = audio.to_vec();
         let language = language.to_string();
 
-        let joined =
-            tokio::task::spawn_blocking(move || run_inference(&ctx, &audio, &language)).await;
+        let joined = tokio::task::spawn_blocking(move || {
+            let mut state = state;
+            let result = run_inference(&mut state, &audio, &language);
+            (state, result)
+        })
+        .await;
 
         // Always release, even if inference failed.
         self.release();
-        joined?
+
+        match joined {
+            Ok((state, result)) => {
+                // Return the state to the pool so the next transcription
+                // reuses its GPU buffers instead of reallocating them.
+                loaded.checkin_state(state);
+                result
+            }
+            Err(error) => Err(anyhow::anyhow!("inference task panicked: {error}")),
+        }
     }
 
     async fn warm_up(&self) {
         match self.acquire().await {
-            Ok(_) => {
+            Ok(loaded) => {
+                // Also pre-create one state so the first real dictation does
+                // not pay the ~700MB GPU buffer allocation either.
+                match loaded.checkout_state() {
+                    Ok(state) => loaded.checkin_state(state),
+                    Err(error) => tracing::error!(%error, "failed to preload Whisper state"),
+                }
                 self.release();
                 tracing::info!("Whisper model preloaded");
             }
@@ -168,10 +228,11 @@ impl TranscriptionBackend for LocalWhisper {
     async fn maybe_unload(&self) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let idle = inner.last_used.elapsed();
-        if inner.ctx.is_some() && inner.active == 0 && idle >= self.idle_unload {
+        if inner.loaded.is_some() && inner.active == 0 && idle >= self.idle_unload {
             tracing::info!("Unloading idle Whisper model after {:?}", idle);
-            // Dropping the reference frees the VRAM when the context is destroyed.
-            inner.ctx = None;
+            // Dropping the last reference frees the pooled states' and the
+            // context's VRAM.
+            inner.loaded = None;
             true
         } else {
             false
