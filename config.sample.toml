@@ -1,0 +1,49 @@
+# VoiceCode — plantilla de configuración.
+# Copiá este archivo como `config.toml` y ajustá los valores a tu equipo.
+
+# Tecla push-to-talk: mantener presionada para dictar.
+# Soportadas: f1-f12, f13-f24 (solo Windows; teclados programables tipo QMK/ZMK),
+# space, ctrl_r (o control_r), alt_r.
+[ptt]
+key = "f12"
+
+# Captura de audio. denoise = supresión de ruido de fondo (RNNoise).
+[audio]
+sample_rate = 16000
+channels = 1
+min_audio_duration_ms = 300
+denoise = true                 # true | false
+
+# Modelo Whisper. model_path: ruta al modelo GGML (.bin); solo backend "local".
+[whisper]
+language = "es"
+model_path = "models/ggml-large-v3.bin"
+
+# Transcripción. backend: "local" (whisper.cpp en GPU) o "groq" (API remota).
+[transcriber]
+backend = "local"              # "local" | "groq"
+max_workers = 2
+idle_unload_seconds = 300      # descarga el modelo local tras N s ociosos (0 = nunca)
+
+# Backend Groq (API compatible-OpenAI). La API key se lee de la env var api_key_env.
+[groq]
+model = "whisper-large-v3"
+api_key_env = "GROQ_API_KEY"
+base_url = "https://api.groq.com/openai/v1"
+
+# Muletillas a eliminar del texto transcrito (lista de regex).
+[cleaner]
+filler_patterns = [
+    "\\beh+\\b",
+    "\\bmmm+\\b",
+    "\\bo sea\\b",
+    "\\bdigamos\\b",
+    "\\bbásicamente\\b",
+    "\\bpues\\b",
+    "\\benton?ces\\b",
+    "\\bla verdad\\b",
+]
+
+# Pegado vía portapapeles: ms de espera antes de restaurar el contenido previo.
+[writer]
+clipboard_restore_delay_ms = 50

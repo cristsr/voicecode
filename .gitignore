@@ -1,31 +1,9 @@
-# ---- Python ----
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-.eggs/
-.Python
+# ---- Rust ----
+/target/
+**/*.rs.bk
 
-# ---- Entornos virtuales ----
-.venv/
-venv/
-env/
-ENV/
-
-# ---- PyInstaller / empaquetado ----
-build/
-dist/
-*.spec.bak
-*.manifest
-
-# ---- Testing / coverage ----
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.mypy_cache/
-.ruff_cache/
+# ---- Paquete de producción (binario pesado) ----
+/dist/
 
 # ---- Modelos Whisper (pesados, se descargan aparte) ----
 *.bin
@@ -33,10 +11,13 @@ htmlcov/
 *.ckpt
 models/
 
-# ---- Secretos / config local ----
+# ---- Config personal (cada quien copia config.sample.toml -> config.toml) ----
+/config.toml
+config.local.toml
+
+# ---- Secretos ----
 .env
 .env.*
-config.local.toml
 *.secret
 
 # ---- IDE / editor ----
