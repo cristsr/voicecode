@@ -80,23 +80,30 @@ impl WhisperTranscriber {
         let text_tx = text_tx.clone();
         tasks.spawn(async move {
             let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
-            match backend
+            // Every chunk must produce a `TranscribedText`, even an empty one:
+            // the writer's `SequenceBuffer` releases items strictly in `seq`
+            // order, so a `seq` that never arrives here would permanently
+            // stall every later chunk waiting behind it.
+            let raw = match backend
                 .transcribe(&chunk.data, chunk.sample_rate, &language)
                 .await
             {
-                Ok(raw) if !raw.trim().is_empty() => {
-                    let _ = text_tx
-                        .send(TranscribedText {
-                            seq: chunk.seq,
-                            raw,
-                        })
-                        .await;
+                Ok(raw) if !raw.trim().is_empty() => raw,
+                Ok(_) => {
+                    tracing::info!(seq = chunk.seq, "Discarding empty transcription");
+                    String::new()
                 }
-                Ok(_) => tracing::info!(seq = chunk.seq, "Discarding empty transcription"),
                 Err(error) => {
-                    tracing::error!(%error, seq = chunk.seq, "Error transcribing audio chunk")
+                    tracing::error!(%error, seq = chunk.seq, "Error transcribing audio chunk");
+                    String::new()
                 }
-            }
+            };
+            let _ = text_tx
+                .send(TranscribedText {
+                    seq: chunk.seq,
+                    raw,
+                })
+                .await;
         });
     }
 
@@ -109,6 +116,19 @@ impl WhisperTranscriber {
         loop {
             tokio::time::sleep(IDLE_CHECK_INTERVAL).await;
             self.backend.maybe_unload().await;
+        }
+    }
+
+    /// Keeps the backend model warm: preloads it once at startup, then reloads
+    /// it on every key-down ping (`warmup_rx`, fed by the `Recorder`) so a
+    /// reload after an idle-unload overlaps with the user speaking instead of
+    /// starting only once they release the key. `warm_up` is a cheap no-op once
+    /// the model is already loaded, and a no-op altogether for stateless
+    /// backends (e.g. Groq).
+    pub async fn warm_up_loop(&self, mut warmup_rx: mpsc::Receiver<()>) {
+        self.backend.warm_up().await;
+        while warmup_rx.recv().await.is_some() {
+            self.backend.warm_up().await;
         }
     }
 }
@@ -210,15 +230,30 @@ mod tests {
 
     #[tokio::test]
     async fn discards_empty_transcription() {
+        // The seq must still arrive (with empty raw) so the writer's
+        // SequenceBuffer does not stall waiting for it forever.
         let out = drain(Arc::new(EmptyBackend), vec![chunk(0)]).await;
-        assert!(out.is_empty());
+        assert_eq!(
+            out,
+            vec![TranscribedText {
+                seq: 0,
+                raw: String::new()
+            }]
+        );
     }
 
     #[tokio::test]
     async fn survives_backend_error() {
-        // Must neither hang nor panic; it just drops the chunk.
+        // Must neither hang nor panic, and must still emit the seq (empty)
+        // so later chunks are not stuck behind it forever.
         let out = drain(Arc::new(ErrorBackend), vec![chunk(0)]).await;
-        assert!(out.is_empty());
+        assert_eq!(
+            out,
+            vec![TranscribedText {
+                seq: 0,
+                raw: String::new()
+            }]
+        );
     }
 
     #[tokio::test]
@@ -226,5 +261,41 @@ mod tests {
         let out = drain(Arc::new(FakeBackend), vec![chunk(0), chunk(1), chunk(2)]).await;
         let seqs: std::collections::HashSet<u64> = out.iter().map(|t| t.seq).collect();
         assert_eq!(seqs, [0, 1, 2].into_iter().collect());
+    }
+
+    #[tokio::test]
+    async fn warm_up_loop_preloads_then_warms_on_each_ping() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingBackend {
+            warms: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl TranscriptionBackend for CountingBackend {
+            async fn transcribe(&self, _: &[f32], _: u32, _: &str) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            async fn warm_up(&self) {
+                self.warms.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let warms = Arc::new(AtomicUsize::new(0));
+        let transcriber = WhisperTranscriber::new(
+            Arc::new(CountingBackend {
+                warms: warms.clone(),
+            }),
+            "es".into(),
+            2,
+            false,
+        );
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(()).await.unwrap(); // one key-down ping
+        drop(tx); // close the channel so the loop ends after draining
+
+        transcriber.warm_up_loop(rx).await;
+
+        // Preload once at startup + once per ping.
+        assert_eq!(warms.load(Ordering::SeqCst), 2);
     }
 }

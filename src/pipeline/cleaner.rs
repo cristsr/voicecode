@@ -1,5 +1,7 @@
 //! Text cleaning stage: strips filler words and tidies the transcription.
 
+use std::sync::OnceLock;
+
 use regex::{Regex, RegexBuilder};
 use tokio::sync::mpsc;
 
@@ -18,17 +20,32 @@ pub fn compile_patterns(patterns: &[String]) -> anyhow::Result<Vec<Regex>> {
         .collect()
 }
 
-/// Pure text cleaner: removes filler words, collapses whitespace, strips
-/// dangling leading punctuation and capitalizes the first letter.
+/// Matches a run of two or more punctuation marks separated only by
+/// whitespace (e.g. ", ," or ", , ,"), which is what's left behind when a
+/// filler word sitting between two marks is removed (e.g. "hola, eh, quiero"
+/// -> "hola, , quiero"). Captures the first mark so the run collapses to it.
+fn repeated_punctuation() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"([,;:])(?:\s*[,;:])+").expect("valid regex"))
+}
+
+/// Pure text cleaner: removes filler words, collapses orphaned punctuation and
+/// whitespace left behind, strips dangling punctuation at either end, and
+/// capitalizes the first letter.
 pub fn clean_text(raw: &str, filler_patterns: &[Regex]) -> String {
     let mut result = raw.to_string();
     for pattern in filler_patterns {
         result = pattern.replace_all(&result, "").into_owned();
     }
+    // Do this before collapsing whitespace: removing a filler from between
+    // two marks leaves a run like ", ," that whitespace-collapsing alone
+    // would not fix.
+    result = repeated_punctuation().replace_all(&result, "$1").into_owned();
     result = collapse_whitespace(&result);
-    // Removing a filler often leaves a dangling leading ",/;/:"
-    // (e.g. "eh, quiero" -> ", quiero"); drop it before capitalizing.
-    result = strip_leading_punctuation(&result);
+    // Removing a filler often leaves dangling punctuation at either end
+    // (e.g. "eh, quiero" -> ", quiero", "quiero, pues" -> "quiero,"); drop it
+    // before capitalizing.
+    result = strip_dangling_punctuation(&result);
     capitalize_first(&result)
 }
 
@@ -36,8 +53,8 @@ fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn strip_leading_punctuation(s: &str) -> String {
-    s.trim_start_matches([',', ';', ':', ' ']).to_string()
+fn strip_dangling_punctuation(s: &str) -> String {
+    s.trim_matches([',', ';', ':', ' ']).to_string()
 }
 
 fn capitalize_first(s: &str) -> String {
@@ -129,5 +146,29 @@ mod tests {
     #[test]
     fn strips_dangling_leading_comma() {
         assert_eq!(clean_text("o sea, listo", &patterns()), "Listo");
+    }
+
+    #[test]
+    fn collapses_orphaned_comma_left_by_mid_sentence_filler() {
+        assert_eq!(
+            clean_text("Hola, eh, quiero decir algo", &patterns()),
+            "Hola, quiero decir algo"
+        );
+    }
+
+    #[test]
+    fn collapses_orphaned_commas_from_consecutive_fillers() {
+        assert_eq!(
+            clean_text("Hola, eh, mmm, quiero decir algo", &patterns()),
+            "Hola, quiero decir algo"
+        );
+    }
+
+    #[test]
+    fn strips_dangling_trailing_comma() {
+        assert_eq!(
+            clean_text("Quiero decir algo, pues", &patterns()),
+            "Quiero decir algo"
+        );
     }
 }

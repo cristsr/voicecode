@@ -1,0 +1,7 @@
+# CUDA 13.x endurece una verificación en sus headers CCCL que exige el
+# preprocesador conforme a estándar de MSVC. whisper.cpp (vía whisper-rs-sys,
+# feature "local") aún no pasa ese flag, así que nvcc aborta con
+# `error C1189: MSVC/cl.exe with traditional preprocessor is used`.
+# Sin esto, compilar con --features local falla en máquinas con CUDA 12.4+/13.x.
+[env]
+NVCC_APPEND_FLAGS = "-Xcompiler=/Zc:preprocessor"

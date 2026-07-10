@@ -27,8 +27,10 @@ pub trait TranscriptionBackend: Send + Sync {
 }
 
 /// Audio source. The real implementation wraps `cpal`; tests use a fake that
-/// returns predefined samples.
-pub trait AudioInput: Send {
+/// returns predefined samples. `Sync` so it can be shared via `Arc` and moved
+/// into `spawn_blocking` (its `stop()` blocks synchronously waiting on the
+/// audio thread and must not run on a Tokio worker thread).
+pub trait AudioInput: Send + Sync {
     fn start(&self, sample_rate: u32, channels: u16) -> anyhow::Result<()>;
 
     /// Stops capture and returns the accumulated mono samples.

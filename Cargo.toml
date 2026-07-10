@@ -62,8 +62,11 @@ reqwest = { version = "0.12", default-features = false, features = ["multipart",
 hound = { version = "3", optional = true }
 
 # Backend local (feature "local")
-whisper-rs = { version = "0.14", optional = true }
+whisper-rs = { version = "0.14", optional = true, features = ["tracing_backend"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
 tempfile = "3"
+
+[target."cfg(windows)".build-dependencies]
+winresource = { version = "0.1.31", default-features = false }
