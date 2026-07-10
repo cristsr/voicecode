@@ -34,6 +34,9 @@ pub struct Audio {
     pub min_audio_duration_ms: u32,
     /// Apply RNNoise suppression to the recording before transcribing.
     pub denoise: bool,
+    /// Auto-normalize the recording's level toward a consistent speech loudness
+    /// before transcribing, so a far-away mic does not force raising the voice.
+    pub auto_gain: bool,
 }
 
 impl Default for Audio {
@@ -43,6 +46,7 @@ impl Default for Audio {
             channels: 1,
             min_audio_duration_ms: 300,
             denoise: true,
+            auto_gain: true,
         }
     }
 }

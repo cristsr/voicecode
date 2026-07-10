@@ -1,76 +1,18 @@
 //! Entry point with a system tray icon.
 //!
-//! The pipeline (Tokio) runs on its own thread; the tray event loop runs on
-//! the main thread (required on Windows/macOS). Menu: *Reiniciar pipeline*
-//! (restart) and *Salir* (quit).
+//! The pipeline (Tokio) runs on its own thread via [`Worker`]; the tray event
+//! loop runs on the main thread (required on Windows/macOS). Menu: *Reiniciar
+//! pipeline* (restart) and *Salir* (quit).
 
 // In release builds this is a windowless tray app. In debug builds the
 // console is kept so logs are visible on stdout.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::thread::JoinHandle;
-
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tokio_util::sync::CancellationToken;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 
-use voicecode::config::Config;
-use voicecode::run_pipeline;
-
-/// Runs the pipeline on its own Tokio runtime, on a dedicated thread, and
-/// exposes a handle to cancel it.
-struct Pipeline {
-    cancel: CancellationToken,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl Pipeline {
-    fn start() -> Self {
-        let cancel = CancellationToken::new();
-        let token = cancel.clone();
-        let handle = std::thread::spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(error) => {
-                    tracing::error!(%error, "failed to build Tokio runtime");
-                    return;
-                }
-            };
-            runtime.block_on(async move {
-                let config = match Config::load_default() {
-                    Ok(config) => config,
-                    Err(error) => {
-                        tracing::error!(%error, "failed to load config");
-                        return;
-                    }
-                };
-                tokio::select! {
-                    result = run_pipeline(config) => {
-                        if let Err(error) = result {
-                            tracing::error!(%error, "pipeline crashed");
-                        }
-                    }
-                    _ = token.cancelled() => tracing::info!("pipeline cancelled"),
-                }
-            });
-        });
-        Self {
-            cancel,
-            handle: Some(handle),
-        }
-    }
-
-    fn stop(&mut self) {
-        self.cancel.cancel();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
+use voicecode::Worker;
 
 fn init_logging() {
     use tracing_subscriber::{fmt, EnvFilter};
@@ -108,7 +50,7 @@ fn tray_icon() -> Icon {
 fn main() {
     init_logging();
 
-    let mut pipeline = Pipeline::start();
+    let mut worker = Worker::start();
 
     let menu = Menu::new();
     let restart_item = MenuItem::new("Reiniciar pipeline", true, None);
@@ -134,11 +76,10 @@ fn main() {
         while let Ok(event) = menu_channel.try_recv() {
             if event.id == restart_id {
                 tracing::info!("Restart requested from tray menu");
-                pipeline.stop();
-                pipeline = Pipeline::start();
+                worker.restart();
             } else if event.id == quit_id {
                 tracing::info!("Exit requested from tray menu");
-                pipeline.stop();
+                worker.stop();
                 *control_flow = ControlFlow::Exit;
             }
         }

@@ -118,6 +118,19 @@ impl WhisperTranscriber {
             self.backend.maybe_unload().await;
         }
     }
+
+    /// Keeps the backend model warm: preloads it once at startup, then reloads
+    /// it on every key-down ping (`warmup_rx`, fed by the `Recorder`) so a
+    /// reload after an idle-unload overlaps with the user speaking instead of
+    /// starting only once they release the key. `warm_up` is a cheap no-op once
+    /// the model is already loaded, and a no-op altogether for stateless
+    /// backends (e.g. Groq).
+    pub async fn warm_up_loop(&self, mut warmup_rx: mpsc::Receiver<()>) {
+        self.backend.warm_up().await;
+        while warmup_rx.recv().await.is_some() {
+            self.backend.warm_up().await;
+        }
+    }
 }
 
 /// Builds the backend selected in `config`, failing with a clear message when
@@ -248,5 +261,41 @@ mod tests {
         let out = drain(Arc::new(FakeBackend), vec![chunk(0), chunk(1), chunk(2)]).await;
         let seqs: std::collections::HashSet<u64> = out.iter().map(|t| t.seq).collect();
         assert_eq!(seqs, [0, 1, 2].into_iter().collect());
+    }
+
+    #[tokio::test]
+    async fn warm_up_loop_preloads_then_warms_on_each_ping() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingBackend {
+            warms: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl TranscriptionBackend for CountingBackend {
+            async fn transcribe(&self, _: &[f32], _: u32, _: &str) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            async fn warm_up(&self) {
+                self.warms.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let warms = Arc::new(AtomicUsize::new(0));
+        let transcriber = WhisperTranscriber::new(
+            Arc::new(CountingBackend {
+                warms: warms.clone(),
+            }),
+            "es".into(),
+            2,
+            false,
+        );
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(()).await.unwrap(); // one key-down ping
+        drop(tx); // close the channel so the loop ends after draining
+
+        transcriber.warm_up_loop(rx).await;
+
+        // Preload once at startup + once per ping.
+        assert_eq!(warms.load(Ordering::SeqCst), 2);
     }
 }
