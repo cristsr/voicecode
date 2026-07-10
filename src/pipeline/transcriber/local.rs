@@ -110,6 +110,10 @@ impl LocalWhisper {
         let ctx = tokio::task::spawn_blocking(move || {
             let mut params = WhisperContextParameters::default();
             params.use_gpu(true);
+            // Fused attention kernel: meaningfully faster decoding on GPU at no
+            // quality cost. Incompatible with DTW token timestamps, which this
+            // pipeline does not use.
+            params.flash_attn(true);
             WhisperContext::new_with_params(&path, params)
         })
         .await
@@ -188,20 +192,23 @@ impl TranscriptionBackend for LocalWhisper {
     async fn transcribe(
         &self,
         audio: &[f32],
-        _sample_rate: u32,
+        sample_rate: u32,
         language: &str,
     ) -> anyhow::Result<String> {
         let loaded = self.acquire().await?;
         let state = loaded.checkout_state()?;
+        let audio_ms = crate::utils::audio::duration_ms(audio, sample_rate);
         let audio = audio.to_vec();
         let language = language.to_string();
 
+        let started = Instant::now();
         let joined = tokio::task::spawn_blocking(move || {
             let mut state = state;
             let result = run_inference(&mut state, &audio, &language);
             (state, result)
         })
         .await;
+        let elapsed = started.elapsed();
 
         // Always release, even if inference failed.
         self.release();
@@ -211,6 +218,14 @@ impl TranscriptionBackend for LocalWhisper {
                 // Return the state to the pool so the next transcription
                 // reuses its GPU buffers instead of reallocating them.
                 loaded.checkin_state(state);
+                // RTF (real-time factor) = inference time / audio duration;
+                // below 1.0 means faster than real time.
+                tracing::info!(
+                    took_ms = elapsed.as_millis() as u64,
+                    audio_ms = audio_ms as u64,
+                    rtf = elapsed.as_secs_f64() / (audio_ms / 1000.0).max(0.001),
+                    "transcription done"
+                );
                 result
             }
             Err(error) => Err(anyhow::anyhow!("inference task panicked: {error}")),
