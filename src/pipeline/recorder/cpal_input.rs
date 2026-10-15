@@ -70,14 +70,19 @@ impl AudioInput for CpalInput {
 /// requests). Samples accumulate interleaved as f32 and, on stop, are downmixed
 /// to mono and resampled to the target `sample_rate` the pipeline requests.
 ///
-/// The stream is opened **once** and kept playing for the life of the process,
-/// rather than being reopened on every key-down. On Windows/WASAPI the audio
-/// endpoint drops into a low-power state after a boot or a long idle, and the
-/// first activation then loses the first few hundred ms of audio — which made
-/// the first utterance after an idle period come in under
-/// `min_audio_duration_ms` and get silently discarded. Keeping the stream alive
-/// holds the endpoint warm; the `capturing` flag gates whether callback samples
-/// are accumulated (during a recording) or dropped (while idle).
+/// The stream is opened up front and kept playing, rather than being reopened
+/// on every key-down. On Windows/WASAPI the audio endpoint drops into a
+/// low-power state after a boot or a long idle, and the first activation then
+/// loses the first few hundred ms of audio — which made the first utterance
+/// after an idle period come in under `min_audio_duration_ms` and get silently
+/// discarded. Keeping the stream alive holds the endpoint warm; the `capturing`
+/// flag gates whether callback samples are accumulated (during a recording) or
+/// dropped (while idle).
+///
+/// The one case that reopens it is the device being lost (sleep/resume, unplug),
+/// which the `device_lost` flag reports from the stream's error callback: such a
+/// stream stays alive as an object but never delivers another callback, so it
+/// must be rebuilt or every later recording captures silence.
 fn audio_thread(rx: std::sync::mpsc::Receiver<Command>, denoise: bool, auto_gain: bool) {
     use crate::utils::audio::{
         denoise_48k_mono, downmix_to_mono, normalize_speech_level, resample_linear, to_dbfs,
@@ -96,6 +101,10 @@ fn audio_thread(rx: std::sync::mpsc::Receiver<Command>, denoise: bool, auto_gain
     // and its Stop. While `false` the stream keeps running (holding the WASAPI
     // endpoint warm) but its samples are dropped.
     let capturing = Arc::new(AtomicBool::new(false));
+    // Set by the stream's error callback when the device goes away. A lost
+    // stream stays `Some` and keeps its `play()` state, so this flag is the
+    // only signal that it has stopped delivering callbacks.
+    let device_lost = Arc::new(AtomicBool::new(false));
     let mut stream: Option<cpal::Stream> = None;
     // Native config the stream was opened with, plus the target from Start.
     let mut native_rate: u32 = 0;
@@ -110,6 +119,7 @@ fn audio_thread(rx: std::sync::mpsc::Receiver<Command>, denoise: bool, auto_gain
         &mut native_channels,
         &buffer,
         &capturing,
+        &device_lost,
     );
 
     while let Ok(command) = rx.recv() {
@@ -117,6 +127,15 @@ fn audio_thread(rx: std::sync::mpsc::Receiver<Command>, denoise: bool, auto_gain
             Command::Start { sample_rate } => {
                 target_rate = sample_rate;
                 buffer.lock().unwrap().clear();
+                // On sleep/resume (or an unplug) WASAPI invalidates the
+                // endpoint: the stream survives as a live object but never
+                // fires its callback again, so every later recording would
+                // capture pure silence until the process restarts. Drop the
+                // dead stream and reopen against the current device.
+                if device_lost.load(Ordering::Acquire) {
+                    tracing::info!("input device was lost; reopening stream");
+                    stream = None;
+                }
                 if stream.is_none() {
                     open_stream(
                         &mut stream,
@@ -124,6 +143,7 @@ fn audio_thread(rx: std::sync::mpsc::Receiver<Command>, denoise: bool, auto_gain
                         &mut native_channels,
                         &buffer,
                         &capturing,
+                        &device_lost,
                     );
                 }
                 if stream.is_some() {
@@ -171,6 +191,7 @@ fn open_stream(
     native_channels: &mut u16,
     buffer: &Arc<Mutex<Vec<f32>>>,
     capturing: &Arc<AtomicBool>,
+    device_lost: &Arc<AtomicBool>,
 ) {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -201,12 +222,16 @@ fn open_stream(
         "opening input stream in native config (kept warm)"
     );
 
+    // Cleared before the build so that a stream failing immediately re-marks
+    // the flag rather than having that mark wiped by this reset.
+    device_lost.store(false, Ordering::Release);
     let built = build_capture_stream(
         &device,
         &config,
         sample_format,
         buffer.clone(),
         capturing.clone(),
+        device_lost.clone(),
     );
     match built {
         Ok(started) => match started.play() {
@@ -227,10 +252,16 @@ fn build_capture_stream(
     sample_format: cpal::SampleFormat,
     buffer: Arc<Mutex<Vec<f32>>>,
     capturing: Arc<AtomicBool>,
+    device_lost: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     use cpal::traits::DeviceTrait;
 
-    let err_fn = |error| tracing::warn!(%error, "audio input error");
+    // Losing the device surfaces only here; flag it so the next Start rebuilds
+    // the stream instead of capturing silence from a dead one forever.
+    let err_fn = move |error| {
+        device_lost.store(true, Ordering::Release);
+        tracing::warn!(%error, "audio input error");
+    };
     match sample_format {
         cpal::SampleFormat::F32 => device.build_input_stream(
             config,

@@ -68,5 +68,9 @@ whisper-rs = { version = "0.14", optional = true, features = ["tracing_backend"]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
 tempfile = "3"
 
+[target."cfg(windows)".dependencies]
+# Ya en el árbol vía rdev; se usa para GetAsyncKeyState (listener PTT).
+winapi = { version = "0.3", features = ["winuser", "synchapi", "errhandlingapi", "winerror"] }
+
 [target."cfg(windows)".build-dependencies]
 winresource = { version = "0.1.31", default-features = false }

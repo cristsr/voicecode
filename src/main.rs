@@ -47,7 +47,30 @@ fn tray_icon() -> Icon {
     Icon::from_rgba(rgba, SIZE, SIZE).expect("valid icon rgba")
 }
 
+/// Takes a process-wide named mutex; `false` means another instance already
+/// holds it. The handle is intentionally leaked: the OS frees it on exit.
+#[cfg(windows)]
+fn acquire_single_instance() -> bool {
+    use winapi::shared::winerror::ERROR_ALREADY_EXISTS;
+    use winapi::um::errhandlingapi::GetLastError;
+    use winapi::um::synchapi::CreateMutexW;
+
+    let name: Vec<u16> = "VoiceCode.SingleInstance".encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let handle = CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr());
+        !handle.is_null() && GetLastError() != ERROR_ALREADY_EXISTS
+    }
+}
+
+#[cfg(not(windows))]
+fn acquire_single_instance() -> bool {
+    true // ponytail: Windows-only guard, add a lock file if Linux needs it.
+}
+
 fn main() {
+    if !acquire_single_instance() {
+        return;
+    }
     init_logging();
 
     let mut worker = Worker::start();

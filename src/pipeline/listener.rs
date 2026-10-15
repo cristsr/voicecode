@@ -3,7 +3,9 @@
 //! `rdev::listen` blocks the thread, so it runs on a dedicated `std::thread`
 //! that forwards events over an `mpsc` channel.
 
-use rdev::{Event, EventType, Key};
+#[cfg(not(windows))]
+use rdev::{Event, EventType};
+use rdev::Key;
 use tokio::sync::mpsc;
 
 use crate::domain::models::{KeyEvent, KeyEventKind};
@@ -18,6 +20,8 @@ impl PttListener {
     pub fn new(key_name: &str) -> anyhow::Result<Self> {
         let target = parse_key(key_name)
             .ok_or_else(|| anyhow::anyhow!("unsupported PTT key: '{key_name}'"))?;
+        #[cfg(windows)]
+        windows_vk(target).ok_or_else(|| anyhow::anyhow!("unsupported PTT key: '{key_name}'"))?;
         Ok(Self {
             key_name: key_name.to_string(),
             target,
@@ -25,6 +29,35 @@ impl PttListener {
     }
 
     /// Starts the global listener. Does not return while the pipeline is alive.
+    ///
+    /// Windows polls `GetAsyncKeyState` instead of using `rdev`'s
+    /// `WH_KEYBOARD_LL` hook: Windows silently uninstalls a low-level hook
+    /// after sleep/resume or a slow callback, and `rdev::listen` never notices,
+    /// so PTT would go dead until the process restarted. Polling has no hook
+    /// to lose.
+    #[cfg(windows)]
+    pub async fn run(&self, key_tx: mpsc::Sender<KeyEvent>) {
+        let vk = windows_vk(self.target).expect("PTT key has a Windows VK code");
+        let mut was_down = false;
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(15));
+        loop {
+            tick.tick().await;
+            // High bit set = key currently down.
+            let down = unsafe { winapi::um::winuser::GetAsyncKeyState(vk) } < 0;
+            if down == was_down {
+                continue;
+            }
+            was_down = down;
+            let kind = if down { KeyEventKind::Down } else { KeyEventKind::Up };
+            let msg = KeyEvent { kind, key: self.key_name.clone() };
+            if let Err(error) = key_tx.try_send(msg) {
+                tracing::warn!(%error, "dropped PTT key event");
+            }
+        }
+    }
+
+    /// Starts the global listener. Does not return while the pipeline is alive.
+    #[cfg(not(windows))]
     pub async fn run(&self, key_tx: mpsc::Sender<KeyEvent>) {
         let target = self.target;
         let key_name = self.key_name.clone();
@@ -56,6 +89,30 @@ impl PttListener {
         // Keep this stage alive for as long as the pipeline runs.
         std::future::pending::<()>().await;
     }
+}
+
+/// Win32 virtual-key code for a parsed PTT key (the inverse of `parse_key`).
+#[cfg(windows)]
+fn windows_vk(key: Key) -> Option<i32> {
+    Some(match key {
+        Key::F1 => 0x70,
+        Key::F2 => 0x71,
+        Key::F3 => 0x72,
+        Key::F4 => 0x73,
+        Key::F5 => 0x74,
+        Key::F6 => 0x75,
+        Key::F7 => 0x76,
+        Key::F8 => 0x77,
+        Key::F9 => 0x78,
+        Key::F10 => 0x79,
+        Key::F11 => 0x7A,
+        Key::F12 => 0x7B,
+        Key::Space => 0x20,
+        Key::ControlRight => 0xA3,
+        Key::AltGr => 0xA5,
+        Key::Unknown(code) => code as i32,
+        _ => return None,
+    })
 }
 
 /// Maps a configured key name to its `rdev::Key`.
@@ -165,6 +222,13 @@ mod tests {
         assert_eq!(parse_key("f13"), Some(Key::Unknown(191)));
         assert_eq!(parse_key("F13"), Some(Key::Unknown(191)));
         assert_eq!(parse_key("f24"), Some(Key::Unknown(202)));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn maps_ptt_keys_to_vk_codes() {
+        assert_eq!(windows_vk(parse_key("f12").unwrap()), Some(0x7B));
+        assert_eq!(windows_vk(parse_key("f13").unwrap()), Some(0x7C));
     }
 
     #[test]
